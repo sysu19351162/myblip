@@ -1,0 +1,27 @@
+image_root: '/mnt/data/datasets/NLVR2/'
+#ann_root: 'annotation'
+ann_root: '/mnt/data/yangzhenbang/datasets/blip_caption/data_coco_vg_flickr/kg_data'
+# set pretrained as a file path or an url
+#pretrained: 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_nlvr.pth'
+pretrained: "https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base.pth"
+#pretrained: '/mnt/data/yangzhenbang/BLIP/output/Pretrain_knowledge_new/checkpoint_09.pth'
+#size of vit model; base or large
+vit: 'base'
+batch_size_train: 4
+batch_size_test: 32
+#batch_size_train: 1
+#batch_size_test: 1
+vit_grad_ckpt: False
+vit_ckpt_layer: 0
+max_epoch: 15
+
+image_size: 384
+
+# optimizer
+weight_decay: 0.05
+init_lr: 3e-5
+min_lr: 0
+#knowledge
+sample_rate: 0.5
+image_gating: true
+text_gating: false

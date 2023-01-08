@@ -1,0 +1,19 @@
+image_root: '/mnt/data/datasets/nocaps/'
+ann_root: '/mnt/data/yangzhenbang/datasets/blip_caption/data_coco_vg_flickr/kg_data'
+
+# set pretrained as a file path or an url
+#pretrained: 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_caption_capfilt_large.pth'
+pretrained: '/mnt/data/yangzhenbang/BLIP/output/Pretrain_knowledge_new/checkpoint_09.pth'
+
+vit: 'base'
+batch_size: 32
+
+image_size: 384
+
+max_length: 20
+min_length: 5
+num_beams: 3
+prompt: 'a picture of '
+
+#knowledge
+sample_rate: 0.5
