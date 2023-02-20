@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 from data.utils import pre_caption
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
+import pandas as pd
 
 import torch
 import torch.nn as nn
@@ -183,6 +184,7 @@ class NLVR(Dataset):
 
         # download_url(urls[split], ann_root)
         normalize = transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+        self.annotation_path = os.path.join(ann_root, filenames[split])
         self.annotation = json.load(open(os.path.join(ann_root, filenames[split]), 'r'))
         self.transform = transforms.Compose([
             transforms.Resize((384, 384), interpolation=InterpolationMode.BICUBIC),
@@ -219,6 +221,64 @@ class NLVR(Dataset):
 
         return image, index , self.annotation[index]
 
+class CSVreader:
+    # def __init__(self, transform, image_root, ann_root, split,split_num, max_words=30):
+    def __init__(self, image_root, ann_root, split, split_num='', max_words=30):
+
+        '''
+        image_root (string): Root directory of images (e.g. coco/images/)
+        ann_root (string): directory to store the annotation file
+        split (string): train or val or test
+        '''
+
+        filenames = {'cc3m':'caption_data_train_', 'cc12m': 'cc12m_split_', 'test': 'vg_example_visual_concept'}
+
+        # download_url(urls[split], ann_root)
+        self.split = split
+        self.annotation_path = os.path.join(ann_root, filenames[split] + '.csv')
+        normalize = transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+        if split == 'test':
+            self.annotation = pd.read_csv(os.path.join(ann_root, filenames[split] + '.csv'), iterator=False)
+        else:
+            self.annotation = pd.read_csv(os.path.join(ann_root, filenames[split]+split_num+'.csv'), chunksize=1, iterator=False)
+        # self.annotation = json.load(open(os.path.join(ann_root, filenames[split]+split_num+'.csv'), 'r'))
+        self.transform = transforms.Compose([
+            transforms.Resize((384, 384), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        # self.transform = transforms.ToTensor()
+        self.image_root = image_root
+
+        self.text = []
+        self.image = []
+        self.txt2img = {}
+        self.img2txt = {}
+
+        # txt_id = 0
+        # for img_id, ann in enumerate(self.annotation):
+        #     self.image.append(ann['image'])
+        #     self.img2txt[img_id] = []
+        #     for i, caption in enumerate(ann['caption']):
+        #         self.text.append(pre_caption(caption, max_words))
+        #         self.img2txt[img_id].append(txt_id)
+        #         self.txt2img[txt_id] = img_id
+        #         txt_id += 1
+
+    def __len__(self):
+        # print(self.annotation)
+        # print(type(self.annotation))
+        return len(self.annotation)
+
+    def __getitem__(self, index):
+        # print(self.annotation['images'])
+        # print(self.annotation['images'][index])
+        image_path = os.path.join(self.image_root, self.annotation['images'][index])
+        image = Image.open(image_path).convert('RGB')
+        # image = Image.open(image_path)
+        image = self.transform(image)
+
+        return image, index , self.annotation['images'][index]
 
 
 def train(model, data_loader, optimizer, epoch, device, config):
@@ -270,7 +330,9 @@ def evaluation(model, data_loader, device, config):
     start_time = time.time()
     print('process text feature')
     #todo:这里可以直接读取vocab,下面的for循环可以全部改掉，照着clip的逻辑写
-    object_vocab_file = '/mnt/data/yangzhenbang/datasets/blip_caption/coco_flickr_vg_vocab_count.json'
+    object_vocab_file = '/data1/yangzhenbang_new/datasets/blip_caption/coco_flickr_vg_vocab_count.json'
+    # object_vocab_file = '/mnt/data/yangzhenbang/datasets/blip_caption/coco_flickr_vg_vocab_count.json'
+
     with open(object_vocab_file) as f:
         texts = json.load(f)
     num_text = len(texts)
@@ -316,6 +378,7 @@ def evaluation(model, data_loader, device, config):
             image_names.append(i)
         # todo:相似性算完之后直接按照clip取top20
         sims_matrix = image_embed @ text_embeds.t()
+        print(sims_matrix.shape)
         score_matrix_i2t = torch.full((len(data_loader.dataset.image), len(texts)), -100.0).to(device)
         # print(score_matrix_i2t.shape)
         num_tasks = utils.get_world_size()
@@ -323,20 +386,23 @@ def evaluation(model, data_loader, device, config):
         step = sims_matrix.size(0) // num_tasks + 1
         start = rank * step
         end = min(sims_matrix.size(0), start + step)
-        sim_list = []
+        sim_lists = []
         # print(sims_matrix.size(0))
         # print(sims_matrix.size(1))
-        for i, sims in tqdm(enumerate(metric_logger.log_every(sims_matrix[start:end], 50, header))):
+        for k, sims in tqdm(enumerate(metric_logger.log_every(sims_matrix[start:end], 50, header))):
 
             sim_list = []
             topk_sim, topk_idx = sims.topk(k=config['k_test'], dim=0)
             topk_sim = topk_sim.cpu().numpy()
             for idx, j in enumerate(topk_idx.cpu().numpy()):
-                sim_list.append({texts[j]: np.float(topk_sim[idx])})
+                # sim_list.append({texts[j]: np.float(topk_sim[idx])})
+                sim_list.append(texts[j])
             # print(len(image_names))
             # print(i)
-            result[image_names[i]]= sim_list
-     
+            sim_lists.append(sim_list)
+        for idx , name in enumerate(image_names):
+            result[name]= sim_lists[idx]
+
     # image_feats = torch.cat(image_feats,dim=0)
     # image_embeds = torch.cat(image_embeds,dim=0)
 
@@ -447,6 +513,12 @@ def main(args, config):
     vg_root = '/mnt/data/yangzhenbang/BLIP/annotation/vg_example_pictures.json'
     nocaps_root = '/mnt/data/datasets/nocaps/'
     nlvr_root = '/mnt/data/datasets/NLVR2/'
+    csv_root = '/mnt/data/yangzhenbang/datasets/blip_caption/data_coco_vg_flickr/kg_data/vg_knowledge_example.csv'
+
+
+    csv_example_dataset = '/data1/yangzhenbang_new/datasets/blip_caption/data_flickr_coco_vg'
+    csv_dataset = CSVreader('/data1/yangzhenbang_new/datasets/coco/',csv_example_dataset,'test')
+    csv_dataloader = DataLoader(csv_dataset,batch_size=config['batch_size_test'], num_workers=1,shuffle=False)
 
     # train_nlvr_dataset = NLVR(nlvr_root, ann_root, 'train')
     # val_nlvr_dataset = NLVR(nlvr_root, ann_root, 'val')
@@ -460,8 +532,8 @@ def main(args, config):
     # nocaps_test_dataset = nocaps_eval(nocaps_root, ann_root, 'test')
     # nocaps_test_loader = DataLoader(nocaps_test_dataset, batch_size=config['batch_size_test'], num_workers=1)
 
-    vg_dataset = visual_genome(vg_root)
-    vg_loader = DataLoader(vg_dataset, batch_size=config['batch_size_test'], num_workers=1)
+    # vg_dataset = visual_genome(vg_root)
+    # vg_loader = DataLoader(vg_dataset, batch_size=config['batch_size_test'], num_workers=1)
     # train_coco_dataset = coco_karpathy(coco_image_root, ann_root,'train')
     # val_coco_dataset = coco_karpathy(coco_image_root, ann_root,'val')
     # test_coco_dataset = coco_karpathy(coco_image_root, ann_root, 'test')
@@ -544,10 +616,18 @@ def main(args, config):
         #           encoding='utf-8') as fw:
         #     json.dump(test_result, fw, indent=4)
 
-        test_result = evaluation(model_without_ddp, vg_loader, device, config)
-        with open("/mnt/data/yangzhenbang/datasets/blip_caption/data_coco_vg_flickr/vg_example_visual_concept.json", 'w',
-                  encoding='utf-8') as fw:
-            json.dump(test_result, fw, indent=4)
+        test_result = evaluation(model_without_ddp, csv_dataloader, device, config)
+
+        df = pd.read_csv(csv_dataset.annotation_path)
+        df['visual_concept'] = test_result.values()
+        print(df)
+        # df.to_csv('/data1/yangzhenbang_new/datasets/blip_caption/data_flickr_coco_vg/vg_vc_example.csv', index=None)
+        df.to_csv('/mnt/data/yangzhenbang/datasets/blip_caption/data_coco_vg_flickr/kg_data/vg_vc_example.csv',  index=None)
+
+        # test_result = evaluation(model_without_ddp, vg_loader, device, config)
+        # with open("/mnt/data/yangzhenbang/datasets/blip_caption/data_coco_vg_flickr/vg_example_visual_concept.json", 'w',
+        #           encoding='utf-8') as fw:
+        #     json.dump(test_result, fw, indent=4)
         # test_result = evaluation(model_without_ddp, test_coco_loader, device, config)
         # with open("/mnt/data/yangzhenbang/datasets/blip_caption/data_coco_vg_flickr/coco_test_visual_concept.json", 'w', encoding='utf-8') as fw:
         #     json.dump(test_result, fw, indent=4)
@@ -590,7 +670,7 @@ def main(args, config):
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '4'
 
     parser.add_argument('--config', default='./configs/visual_concept.yaml')
     parser.add_argument('--output_dir', default='output/Visual_concept')
