@@ -13,13 +13,19 @@ from data.utils import pre_caption
 import os,glob
 
 class pretrain_dataset(Dataset):
-    def __init__(self, ann_file, laion_path, transform): 
-
+    def __init__(self, ann_file, cc3m_file, cc3m_path, laion_path, transform):
+        self.cc3m_path = cc3m_path
         self.ann_pretrain = []
         for f in ann_file:
             print('loading '+f)
             ann = json.load(open(f,'r'))
             self.ann_pretrain += ann
+
+        for f in cc3m_file:
+            print('loading ' + f)
+            ann = json.load(open(f, 'r'))
+            self.ann_pretrain += ann.values()
+
         
         self.laion_path = laion_path
         if self.laion_path:
@@ -50,11 +56,19 @@ class pretrain_dataset(Dataset):
     
     def __getitem__(self, index):    
         
-        ann = self.annotation[index]   
-      
-        image = Image.open(ann['image']).convert('RGB')   
+        ann = self.annotation[index]
+        # print(ann)
+        # print(ann['img_name'])
+        # print(type(ann['img_name']))
+        # print(ann['img_name'][0])
+        # print(type(ann['img_name'][0]))
+        if ann['img_name'][0] == '/':
+            image = Image.open(ann['img_name']).convert('RGB')
+        else:
+            image = Image.open(os.path.join(self.cc3m_path, ann['img_name'])).convert('RGB')
         image = self.transform(image)
         caption = pre_caption(ann['caption'],30)
+        caption
         
         return image, caption
 

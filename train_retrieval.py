@@ -336,7 +336,7 @@ def main(args, config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = '2'
+    # os.environ["CUDA_VISIBLE_DEVICES"] = '2'
     print(os.environ["CUDA_VISIBLE_DEVICES"])
     parser.add_argument('--config', default='./configs/retrieval_flickr.yaml')
     parser.add_argument('--output_dir', default='output/Retrieval_flickr')        

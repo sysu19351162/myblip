@@ -1,21 +1,22 @@
 image_root: '/mnt/data/datasets/coco/coco2014/'
-ann_root: '/mnt/data/yangzhenbang/datasets/blip_caption/data_coco_vg_flickr/kg_data'
+ann_root: '/data1/yangzhenbang/datasets/blip_caption/data_knowledge'
 dataset: 'coco_knowledge'
-
+start_epoch: 0
 # set pretrained as a file path or an url
 #pretrained: 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_retrieval_coco.pth'
-pretrained: 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base.pth'
+pretrained: 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_capfilt_large.pth'
 #pretrained: '/mnt/data/yangzhenbang/BLIP/output/Pretrain_knowledge_new/checkpoint_09.pth'
 #pretrained: '/mnt/data/yangzhenbang/BLIP/output/Pretrain_knowledge_unfix/checkpoint_01.pth'
 #pretrained: '/mnt/data/yangzhenbang/BLIP/output/pretrain_knowledge_new/checkpoint_02.pth'
+#pretrained: '/data1/yangzhenbang/BLIP/output/retrieval_coco_knowledge_lora/checkpoint_best.pth'
 
 # size of vit model; base or large
 
 vit: 'base'
 #batch_size_train: 16
 #batch_size_test: 16
-batch_size_train: 8
-batch_size_test: 8
+batch_size_train: 24
+batch_size_test: 24
 vit_grad_ckpt: True
 vit_ckpt_layer: 4
 init_lr: 1e-5

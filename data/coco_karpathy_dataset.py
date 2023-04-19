@@ -17,13 +17,13 @@ class coco_karpathy_train_knowledge(Dataset):
         ann_root (string): directory to store the annotation file
         '''
         url = 'https://storage.googleapis.com/sfr-vision-language-research/datasets/coco_karpathy_train.json'
-        filename = 'coco_train_has_knowledge.json'
-        image_knowledge_name = "coco_train_visual_knowledge.json"
+        filename = 'coco_train_text_knowledge.json'
+        # image_knowledge_name = "coco_train_visual_knowledge.json"
         # filename = 'example_has_knowledge.json'
         # download_url(url, ann_root)
 
         self.annotation = json.load(open(os.path.join(ann_root, filename), 'r'))
-        self.image_knowledge = json.load(open(os.path.join(ann_root, image_knowledge_name), 'r'))
+        # self.image_knowledge = json.load(open(os.path.join(ann_root, image_knowledge_name), 'r'))
         self.transform = transform
         self.image_root = image_root
         self.max_words = max_words
@@ -54,24 +54,22 @@ class coco_karpathy_train_knowledge(Dataset):
         knowledge_conceptnet = ''
         knowledge_vg = ''
 
-        for i in random.sample(self.ann['knowledge_conceptnet'], round(len(self.ann['knowledge_conceptnet']) * self.sample_rate)):
-            knowledge_conceptnet += i
-            knowledge_conceptnet += ','
-        knowledge_conceptnet = pre_caption(knowledge_conceptnet, self.max_words)
+        for i in random.sample(ann['knowledge_vg'], round(len(ann['knowledge_vg']) * self.sample_rate)):
+            knowledge_vg += i
+            knowledge_vg += ','
+        knowledge_vg = pre_caption(knowledge_vg, self.max_words)
+        knowledge_vg = ' Related information: '+knowledge_vg
+        # knowledge_conceptnet_image = ''
+        # knowledge_vg_image = ''
+        #
+        # for i in random.sample(self.image_knowledge[ann['image_id']]['knowledge_conceptnet'], round(len(
+        #         self.image_knowledge[ann['image_id']]['knowledge_conceptnet']) * self.sample_rate)):
+        #     knowledge_conceptnet += i
+        #     knowledge_conceptnet += ','
+        # knowledge_conceptnet = pre_caption(knowledge_conceptnet, self.max_words)
 
-        knowledge_conceptnet_image = ''
-        knowledge_vg_image = ''
-
-        for i in random.sample(self.image_knowledge[ann['image_id']]['knowledge_conceptnet'], round(len(
-                self.image_knowledge[ann['image_id']]['knowledge_conceptnet']) * self.sample_rate)):
-            knowledge_conceptnet += i
-            knowledge_conceptnet += ','
-        knowledge_conceptnet = pre_caption(knowledge_conceptnet, self.max_words)
-
-
-        return image, caption, self.img_ids[ann['image_id']], knowledge_conceptnet, knowledge_vg, knowledge_conceptnet_image, knowledge_vg_image
-
-
+        caption = caption + knowledge_vg
+        return image, caption, self.img_ids[ann['image_id']], knowledge_conceptnet, knowledge_vg
 
 
 
@@ -84,10 +82,11 @@ class coco_karpathy_retrieval_eval_knowledge(Dataset):
         '''
         urls = {'val': 'https://storage.googleapis.com/sfr-vision-language-research/datasets/coco_karpathy_val.json',
                 'test': 'https://storage.googleapis.com/sfr-vision-language-research/datasets/coco_karpathy_test.json'}
-        filenames = {'val': 'coco_caption_val_has_knowledge.json', 'test': 'coco_caption_test_has_knowledge.json'}
+        filenames = {'val': 'coco_val_text_knowledge.json', 'test': 'coco_test_text_knowledge.json'}
         # filenames = {'val': 'example_has_knowledge.json', 'test': 'example_has_knowledge.json'}
         # download_url(urls[split], ann_root)
         self.annotation = json.load(open(os.path.join(ann_root, filenames[split]), 'r'))
+        # print(len(self.annotation))
         self.transform = transform
         self.image_root = image_root
         self.max_words = max_words
@@ -95,16 +94,18 @@ class coco_karpathy_retrieval_eval_knowledge(Dataset):
         self.text = []
         self.image = []
         # self.knowledge_cc = []
-        # self.knowledge_vg = []
+        self.all_knowledge_vg = []
         self.txt2img = {}
         self.img2txt = {}
 
         img_id = 0
         pre_img_id = ''
+        txt_id = 0
+        flag = False
         for idx, ann in enumerate(self.annotation):
-            # if idx == 1000:
-            #     break
-            # print(ann['image_id'] != pre_img_id)
+            # # if idx == 1000:
+            # #     break
+            # # print(ann['image_id'] != pre_img_id)
             if ann['image_id'] != pre_img_id:
                 # print(idx)
                 # print(img_id == 0)
@@ -117,14 +118,33 @@ class coco_karpathy_retrieval_eval_knowledge(Dataset):
                 pre_img_id = ann['image_id']
                 # print(self.image[img_id])
                 # print(img_id)
+
             if not self.img2txt.__contains__(img_id):
+            # img_id = idx
                 self.img2txt[img_id] = []
-            self.text.append(pre_caption(ann['caption'], max_words))
-            self.img2txt[img_id].append(idx)
+
+            # knowledge_conceptnet = ''
+            knowledge_vg = ''
+            # print(self.sample_rate)
+            for i in ann['knowledge_vg']:
+                knowledge_vg += i
+                knowledge_vg += ','
+            knowledge_vg = pre_caption(knowledge_vg, self.max_words)
+            knowledge_vg = '. Related information: ' + knowledge_vg
+
+            text =pre_caption(ann['caption'], max_words) + knowledge_vg
+            self.text.append(text)
+            # print(text)
+
+
+            # self.all_knowledge_vg.append(knowledge_vg)
             # print(img_id)
-            self.txt2img[idx] = img_id
+            # print(txt_id)
+            self.img2txt[img_id].append(txt_id)
+            # print(img_id)
+            self.txt2img[txt_id] = img_id
             # self.k2img[idx] = img_id
-            # txt_id += 1
+            txt_id += 1
 
             # for i, caption in enumerate(ann['caption']):
             #     self.text.append(pre_caption(caption, max_words))
@@ -144,9 +164,6 @@ class coco_karpathy_retrieval_eval_knowledge(Dataset):
         # print(len(self.knowledge_cc))
         # print(knowledge_conceptnet.shape)
 
-
-
-
     def __len__(self):
         return len(self.image)
 
@@ -156,17 +173,9 @@ class coco_karpathy_retrieval_eval_knowledge(Dataset):
         image = Image.open(image_path).convert('RGB')
         image = self.transform(image)
 
-        knowledge_conceptnet = ''
-        knowledge_vg = ''
+        return image, index
 
-        for i in self.annotation[index]['knowledge_conceptnet']:
-            knowledge_conceptnet += i
-            knowledge_conceptnet += ','
-        knowledge_conceptnet = pre_caption(knowledge_conceptnet, self.max_words)
-
-        # return image, index
-
-        return image, index, knowledge_conceptnet, knowledge_vg
+        # return image, index, knowledge_conceptnet, knowledge_vg
 
 class coco_caption_train_knowledge(Dataset):
     def __init__(self, transform, image_root, ann_root, max_words=30, prompt='',sample_rate=0.5):
@@ -304,6 +313,7 @@ class coco_karpathy_caption_eval(Dataset):
         download_url(urls[split],ann_root)
         
         self.annotation = json.load(open(os.path.join(ann_root,filenames[split]),'r'))
+
         self.transform = transform
         self.image_root = image_root
         
@@ -337,6 +347,8 @@ class coco_karpathy_retrieval_eval(Dataset):
         download_url(urls[split],ann_root)
         
         self.annotation = json.load(open(os.path.join(ann_root,filenames[split]),'r'))
+        print('len(self.annotation)')
+        print(len(self.annotation))
         self.transform = transform
         self.image_root = image_root
         

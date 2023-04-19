@@ -31,7 +31,7 @@ def create_dataset(dataset, config, min_scale=0.5):
         ])  
         
     if dataset=='pretrain':
-        dataset = pretrain_dataset(config['train_file'], config['laion_path'], transform_train)              
+        dataset = pretrain_dataset(config['train_file'], config['cc3m_file'], config['cc3m_path'], config['laion_path'], transform_train)
         return dataset
 
     elif dataset=='pretrain_knowledge':

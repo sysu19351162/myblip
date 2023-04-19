@@ -13,7 +13,6 @@ import random
 import time
 import datetime
 import json
-from tqdm import tqdm
 from pathlib import Path
 
 import torch
@@ -23,7 +22,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 
-from models.blip_retrieval import blip_retrieval_knowledge
+from models.blip_retrieval import blip_retrieval
 import utils
 from utils import cosine_lr_schedule
 from data import create_dataset, create_sampler, create_loader
@@ -40,7 +39,7 @@ def train(model, data_loader, optimizer, epoch, device, config):
     header = 'Train Epoch: [{}]'.format(epoch)
     print_freq = 50
 
-    for i, (image, caption, idx, knowledge_conceptnet, knowledge_vg) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for i,(image, caption, idx) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         image = image.to(device,non_blocking=True)   
         idx = idx.to(device,non_blocking=True)   
        
@@ -49,7 +48,7 @@ def train(model, data_loader, optimizer, epoch, device, config):
         else:
             alpha = config['alpha']*min(1,i/len(data_loader))
 
-        loss_ita, loss_itm = model(image, caption, alpha=alpha, idx=idx, knowledge_conceptnet=knowledge_conceptnet, knowledge_vg=knowledge_vg)
+        loss_ita, loss_itm = model(image, caption, alpha=alpha, idx=idx)                  
         loss = loss_ita + loss_itm
         
         optimizer.zero_grad()
@@ -77,83 +76,49 @@ def evaluation(model, data_loader, device, config):
     print('Computing features for evaluation...')
     start_time = time.time()  
 
-    texts = data_loader.dataset.text
-    # knowledge_cc=data_loader.dataset.knowledge_cc
-
-    knowledge_outputs=[]
+    texts = data_loader.dataset.text   
     num_text = len(texts)
     text_bs = 256
     text_ids = []
     text_embeds = []  
     text_atts = []
-    # print(len(knowledge_cc))
-    # print(num_text)
-    print("evaluation_text_feature")
     for i in range(0, num_text, text_bs):
-        # print(i)
-        # print(min(num_text, i+text_bs))
-
-        # knowledge_input = knowledge_cc[i: min(num_text, i+text_bs)]
         text = texts[i: min(num_text, i+text_bs)]
-        # print(len(knowledge_input))
-        # print(len(text))
         text_input = model.tokenizer(text, padding='max_length', truncation=True, max_length=35, return_tensors="pt").to(device) 
         text_output = model.text_encoder(text_input.input_ids, attention_mask = text_input.attention_mask, mode='text')  
         text_embed = F.normalize(model.text_proj(text_output.last_hidden_state[:,0,:]))
-        # knowledge = model.tokenizer(knowledge_input, padding='max_length', truncation=True,
-        #                            max_length=model.knowledge_len,
-        #                            return_tensors="pt").to(device)
-        # knowledge_output = model.knowledge_encoder(knowledge.input_ids, attention_mask=knowledge.attention_mask,
-        #                                           return_dict=True, mode='text')
-        # text_output.last_hidden_state = model.TextKnowledgeGating(text_output.last_hidden_state, knowledge_output.last_hidden_state)
-        text_embeds.append(text_embed)
+        text_embeds.append(text_embed)   
         text_ids.append(text_input.input_ids)
         text_atts.append(text_input.attention_mask)
     
     text_embeds = torch.cat(text_embeds,dim=0)
-    # print(text_embeds.shape)
     text_ids = torch.cat(text_ids,dim=0)
     text_atts = torch.cat(text_atts,dim=0)
     text_ids[:,0] = model.tokenizer.enc_token_id
     
     image_feats = []
     image_embeds = []
-    print("evaluation_image_feature")
-    for image, img_id, knowledge_conceptnet, knowledge_vg in data_loader:
-    # for image, img_id,knowledge_conceptnet, knowledge_vg in data_loader:
-        # knowledge_input = knowledge_conceptnet
-        # knowledge = model.tokenizer(knowledge_input, padding='max_length', truncation=True,
-        #                            max_length=model.knowledge_len,
-        #                            return_tensors="pt").to(device)
-        # knowledge_output = model.knowledge_encoder(knowledge.input_ids, attention_mask=knowledge.attention_mask,
-        #                                            return_dict=True, mode='text')
-        image = image.to(device)
-        image_feat = model.visual_encoder(image)
-        knowledge = model.tokenizer(knowledge_conceptnet, padding='max_length', truncation=True,
-                                    max_length=model.knowledge_len,
-                                    return_tensors="pt").to(device)
-        knowledge_output = model.knowledge_encoder(knowledge.input_ids, attention_mask=knowledge.attention_mask,
-                                                return_dict=True, mode='text')
-        image_feat = model.ImageKnowledgeGating(image_feat, knowledge_output.last_hidden_state)
-        image_embed = model.vision_proj(image_feat[:,0,:])
-        image_embed = F.normalize(image_embed,dim=-1)
+    for image, img_id in data_loader: 
+        image = image.to(device) 
+        image_feat = model.visual_encoder(image)   
+        image_embed = model.vision_proj(image_feat[:,0,:])            
+        image_embed = F.normalize(image_embed,dim=-1)      
         
         image_feats.append(image_feat.cpu())
         image_embeds.append(image_embed)
      
     image_feats = torch.cat(image_feats,dim=0)
     image_embeds = torch.cat(image_embeds,dim=0)
-    # print(image_embeds.shape)
-    print("evaluation data prepared")
+    
     sims_matrix = image_embeds @ text_embeds.t()
     score_matrix_i2t = torch.full((len(data_loader.dataset.image),len(texts)),-100.0).to(device)
-    print(sims_matrix.shape)
+    
     num_tasks = utils.get_world_size()
     rank = utils.get_rank() 
     step = sims_matrix.size(0)//num_tasks + 1
     start = rank*step
     end = min(sims_matrix.size(0),start+step)
-    print("evaluation_score")
+
     for i,sims in enumerate(metric_logger.log_every(sims_matrix[start:end], 50, header)): 
         topk_sim, topk_idx = sims.topk(k=config['k_test'], dim=0)
 
@@ -204,10 +169,6 @@ def evaluation(model, data_loader, device, config):
             
 @torch.no_grad()
 def itm_eval(scores_i2t, scores_t2i, txt2img, img2txt):
-    # print(scores_i2t.shape)
-    # print(scores_t2i.shape)
-    # print(len(img2txt))
-    # print(len(txt2img))
     
     #Images->Text 
     ranks = np.zeros(scores_i2t.shape[0])
@@ -215,9 +176,6 @@ def itm_eval(scores_i2t, scores_t2i, txt2img, img2txt):
         inds = np.argsort(score)[::-1]
         # Score
         rank = 1e20
-        # print(index)
-        # print(img2txt)
-        # print(img2txt[index])
         for i in img2txt[index]:
             tmp = np.where(inds == i)[0][0]
             if tmp < rank:
@@ -234,7 +192,6 @@ def itm_eval(scores_i2t, scores_t2i, txt2img, img2txt):
     
     for index,score in enumerate(scores_t2i):
         inds = np.argsort(score)[::-1]
-        # print(len(np.where(inds == txt2img[index])))
         ranks[index] = np.where(inds == txt2img[index])[0][0]
 
     # Compute metrics
@@ -259,7 +216,6 @@ def itm_eval(scores_i2t, scores_t2i, txt2img, img2txt):
 
 
 def main(args, config):
-
     utils.init_distributed_mode(args)    
     
     device = torch.device(args.device)
@@ -273,7 +229,6 @@ def main(args, config):
 
     #### Dataset #### 
     print("Creating retrieval dataset")
-    print('retrieval_%s'%config['dataset'])
     train_dataset, val_dataset, test_dataset = create_dataset('retrieval_%s'%config['dataset'], config)  
 
     if args.distributed:
@@ -292,16 +247,11 @@ def main(args, config):
 
     #### Model #### 
     print("Creating model")
-    model = blip_retrieval_knowledge(pretrained=config['pretrained'], image_size=config['image_size'], vit=config['vit'],
+    model = blip_retrieval(pretrained=config['pretrained'], image_size=config['image_size'], vit=config['vit'], 
                              vit_grad_ckpt=config['vit_grad_ckpt'], vit_ckpt_layer=config['vit_ckpt_layer'], 
                              queue_size=config['queue_size'], negative_all_rank=config['negative_all_rank'])
 
-    model = model.to(device)
-
-    # for idx, (name, parameter) in enumerate(model.named_parameters()):
-    #     if(parameter.requires_grad == True):
-    #         print(name)
-        # print(parameter.requires_grad)
+    model = model.to(device)   
     
     model_without_ddp = model
     if args.distributed:
@@ -316,9 +266,7 @@ def main(args, config):
     print("Start training")
     start_time = time.time()    
 
-    for epoch in range(0, config['max_epoch']):
-        print("args.evaluate")
-        print(args.evaluate)
+    for epoch in range(0, config['max_epoch']):    
         if not args.evaluate:        
             if args.distributed:
                 train_loader.sampler.set_epoch(epoch)
@@ -326,13 +274,12 @@ def main(args, config):
             cosine_lr_schedule(optimizer, epoch, config['max_epoch'], config['init_lr'], config['min_lr'])
             
             train_stats = train(model, train_loader, optimizer, epoch, device, config)  
-        print("val evaluation")
+            
         score_val_i2t, score_val_t2i, = evaluation(model_without_ddp, val_loader, device, config)
-        print("test evaluation")
         score_test_i2t, score_test_t2i = evaluation(model_without_ddp, test_loader, device, config)
     
-        if utils.is_main_process():
-            print("val eval")
+        if utils.is_main_process():  
+      
             val_result = itm_eval(score_val_i2t, score_val_t2i, val_loader.dataset.txt2img, val_loader.dataset.img2txt)  
             print(val_result)
                                 
@@ -345,8 +292,8 @@ def main(args, config):
                 }
                 torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_best.pth'))  
                 best = val_result['r_mean']        
-                best_epoch = epoch
-                print("test eval")
+                best_epoch = epoch  
+                
                 test_result = itm_eval(score_test_i2t, score_test_t2i, test_loader.dataset.txt2img, test_loader.dataset.img2txt) 
                 print(test_result)
             
@@ -365,7 +312,7 @@ def main(args, config):
                             }
                 with open(os.path.join(args.output_dir, "log.txt"),"a") as f:
                     f.write(json.dumps(log_stats) + "\n")   
-
+                    
         if args.evaluate: 
             break
 
@@ -379,11 +326,10 @@ def main(args, config):
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-
-    os.environ["CUDA_VISIBLE_DEVICES"] = '4,5'
-    print(os.environ["CUDA_VISIBLE_DEVICES"])
-    parser.add_argument('--config', default='./configs/retrieval_flickr_knowledge.yaml')
-    parser.add_argument('--output_dir', default='output/Retrieval_flickr_knowledge')
+    # os.environ["CUDA_VISIBLE_DEVICES"] = '4'
+    os.environ["CUDA_VISIBLE_DEVICES"] = '5'
+    parser.add_argument('--config', default='./configs/retrieval_flickr.yaml')
+    parser.add_argument('--output_dir', default='output/Retrieval_flickr')        
     parser.add_argument('--evaluate', action='store_true')
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--seed', default=42, type=int)
@@ -395,7 +341,7 @@ if __name__ == '__main__':
     config = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-
+        
     yaml.dump(config, open(os.path.join(args.output_dir, 'config.yaml'), 'w'))    
     
     main(args, config)

@@ -162,7 +162,7 @@ def main(args, config):
 
 
 if __name__ == '__main__':
-    os.environ["CUDA_VISIBLE_DEVICES"] = '4,5'
+    os.environ["CUDA_VISIBLE_DEVICES"] = '2,4'
     print(os.environ["CUDA_VISIBLE_DEVICES"])
 
     os.getenv('MASTER_PORT')
@@ -178,7 +178,9 @@ if __name__ == '__main__':
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
     parser.add_argument('--distributed', default=True, type=bool)
     args = parser.parse_args()
+    # args.gpu = [0,1]
     print(os.getenv('MASTER_PORT'))
+
 
     config = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
 

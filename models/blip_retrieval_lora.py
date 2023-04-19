@@ -1,13 +1,34 @@
-from models.med import BertConfig, BertModel, ImageKnowledgeGating, TextKnowledgeGating
+from models.med_lora import BertConfig, BertModel
+# from models.med import BertModel as BertModel_origin
+import loralib as lora
 from transformers import BertTokenizer
+import random
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 
 from models.blip import create_vit, init_tokenizer, load_checkpoint
+from models.vit_lora import VisionTransformer, interpolate_pos_embed
 
 
+def create_vit_lora(vit, image_size, use_grad_checkpointing=False, ckpt_layer=0, drop_path_rate=0):
+    assert vit in ['base', 'large'], "vit parameter must be base or large"
+    if vit == 'base':
+        vision_width = 768
+        visual_encoder = VisionTransformer(img_size=image_size, patch_size=16, embed_dim=vision_width, depth=12,
+                                           num_heads=12, use_grad_checkpointing=use_grad_checkpointing,
+                                           ckpt_layer=ckpt_layer,
+                                           drop_path_rate=0 or drop_path_rate
+                                           )
+    elif vit == 'large':
+        vision_width = 1024
+        visual_encoder = VisionTransformer(img_size=image_size, patch_size=16, embed_dim=vision_width, depth=24,
+                                           num_heads=16, use_grad_checkpointing=use_grad_checkpointing,
+                                           ckpt_layer=ckpt_layer,
+                                           drop_path_rate=0.1 or drop_path_rate
+                                           )
+    return visual_encoder, vision_width
 
 class BLIP_Retrieval_Knowledge(nn.Module):
     def __init__(self,
@@ -31,24 +52,16 @@ class BLIP_Retrieval_Knowledge(nn.Module):
 
         self.visual_encoder, vision_width = create_vit(vit, image_size, vit_grad_ckpt, vit_ckpt_layer)
         self.tokenizer = init_tokenizer()
-        self.config = med_config
         med_config = BertConfig.from_json_file(med_config)
         med_config.encoder_width = vision_width
-        knowledge_encoder_config = BertConfig.from_json_file('configs/knowledge_encoder_config.json')
-        knowledge_encoder_config.encoder_width = vision_width
-        self.knowledge_encoder = BertModel(config=knowledge_encoder_config,add_pooling_layer=False)
         self.text_encoder = BertModel(config=med_config, add_pooling_layer=False)
 
         text_width = self.text_encoder.config.hidden_size
 
         self.vision_proj = nn.Linear(vision_width, embed_dim)
         self.text_proj = nn.Linear(text_width, embed_dim)
-        self.knowledge_len = 200
 
         self.itm_head = nn.Linear(text_width, 2)
-
-        self.ImageKnowledgeGating = ImageKnowledgeGating(self.config)
-        self.TextKnowledgeGating = TextKnowledgeGating(self.config)
 
         # create momentum encoders
         self.visual_encoder_m, vision_width = create_vit(vit, image_size)
@@ -78,38 +91,30 @@ class BLIP_Retrieval_Knowledge(nn.Module):
 
         self.negative_all_rank = negative_all_rank
 
-
-
-    def forward(self, image, caption ,alpha,idx, knowledge_conceptnet, knowledge_vg):
+    def forward(self, image, caption, alpha, idx, kgs):
         with torch.no_grad():
             self.temp.clamp_(0.001, 0.5)
 
-        knowledge = self.tokenizer(knowledge_conceptnet, padding='max_length', truncation=True,
-                                   max_length=self.knowledge_len,
-                                   return_tensors="pt").to(image.device)
-        # (bs，200,dim)
-        knowledge_output = self.knowledge_encoder(knowledge.input_ids, attention_mask=knowledge.attention_mask,
-                                                  return_dict=True, mode='text')
-
         image_embeds = self.visual_encoder(image)
-        image_embeds = self.ImageKnowledgeGating(image_embeds, knowledge_output.last_hidden_state)
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image.device)
         image_feat = F.normalize(self.vision_proj(image_embeds[:, 0, :]), dim=-1)
-
+        # caption = caption + kgs
+        # print(caption)
         text = self.tokenizer(caption, padding='max_length', truncation=True, max_length=35,
                               return_tensors="pt").to(image.device)
 
         text_output = self.text_encoder(text.input_ids, attention_mask=text.attention_mask,
                                         return_dict=True, mode='text')
-        text_output.last_hidden_state = self.TextKnowledgeGating(text_output.last_hidden_state, knowledge_output.last_hidden_state)
         text_feat = F.normalize(self.text_proj(text_output.last_hidden_state[:, 0, :]), dim=-1)
 
         ###============== Image-text Contrastive Learning ===================###
         idx = idx.view(-1, 1)
         idx_all = torch.cat([idx.t(), self.idx_queue.clone().detach()], dim=1)
+        # print(idx)
+        # print(idx.shape)
+        # print(idx_all.shape)
         pos_idx = torch.eq(idx, idx_all).float()
         sim_targets = pos_idx / pos_idx.sum(1, keepdim=True)
-
 
         # get momentum features
         with torch.no_grad():
@@ -125,6 +130,10 @@ class BLIP_Retrieval_Knowledge(nn.Module):
 
             sim_i2t_m = image_feat_m @ text_feat_m_all / self.temp
             sim_t2i_m = text_feat_m @ image_feat_m_all / self.temp
+            # print(sim_targets.shape)
+            # print(sim_t2i_m.shape)
+            # sim_targets = torch.zeros(sim_i2t_m.size()).to(image.device)
+            # sim_targets.fill_diagonal_(1)
 
             sim_i2t_targets = alpha * F.softmax(sim_i2t_m, dim=1) + (1 - alpha) * sim_targets
             sim_t2i_targets = alpha * F.softmax(sim_t2i_m, dim=1) + (1 - alpha) * sim_targets
@@ -152,8 +161,6 @@ class BLIP_Retrieval_Knowledge(nn.Module):
                                        encoder_attention_mask=image_atts,
                                        return_dict=True,
                                        )
-        output_pos.last_hidden_state = self.TextKnowledgeGating(output_pos.last_hidden_state,
-                                                                knowledge_output.last_hidden_state)
 
         if self.negative_all_rank:
             # compute sample similarity
@@ -187,12 +194,10 @@ class BLIP_Retrieval_Knowledge(nn.Module):
 
             text_ids_neg = []
             text_atts_neg = []
-            knowledge_output_neg = []
             for b in range(bs):
                 neg_idx = torch.multinomial(weights_i2t[b], 1).item()
                 text_ids_neg.append(input_ids_world[neg_idx])
                 text_atts_neg.append(att_mask_world[neg_idx])
-                knowledge_output_neg.append(knowledge_output.last_hidden_state[neg_idx])
 
         else:
             with torch.no_grad():
@@ -217,20 +222,16 @@ class BLIP_Retrieval_Knowledge(nn.Module):
             # select a negative text (from same rank) for each image
             text_ids_neg = []
             text_atts_neg = []
-            knowledge_output_neg = []
             for b in range(bs):
                 neg_idx = torch.multinomial(weights_i2t[b], 1).item()
                 text_ids_neg.append(encoder_input_ids[neg_idx])
                 text_atts_neg.append(text.attention_mask[neg_idx])
-                knowledge_output_neg.append(knowledge_output.last_hidden_state[neg_idx])
 
         text_ids_neg = torch.stack(text_ids_neg, dim=0)
         text_atts_neg = torch.stack(text_atts_neg, dim=0)
-        knowledge_output_neg = torch.stack(knowledge_output_neg, dim=0)
 
         text_ids_all = torch.cat([encoder_input_ids, text_ids_neg], dim=0)
         text_atts_all = torch.cat([text.attention_mask, text_atts_neg], dim=0)
-        knowledge_output_all = torch.cat([knowledge_output.last_hidden_state, knowledge_output_neg], dim=0)
 
         image_embeds_all = torch.cat([image_embeds_neg, image_embeds], dim=0)
         image_atts_all = torch.cat([image_atts, image_atts], dim=0)
@@ -241,7 +242,6 @@ class BLIP_Retrieval_Knowledge(nn.Module):
                                        encoder_attention_mask=image_atts_all,
                                        return_dict=True,
                                        )
-        output_neg.last_hidden_state = self.TextKnowledgeGating(output_neg.last_hidden_state, knowledge_output_all)
 
         vl_embeddings = torch.cat([output_pos.last_hidden_state[:, 0, :], output_neg.last_hidden_state[:, 0, :]], dim=0)
         vl_output = self.itm_head(vl_embeddings)
@@ -284,13 +284,14 @@ class BLIP_Retrieval_Knowledge(nn.Module):
 
         self.ptr_queue[0] = ptr
 
-
 def blip_retrieval_knowledge(pretrained='', **kwargs):
     model = BLIP_Retrieval_Knowledge(**kwargs)
     if pretrained:
         model, msg = load_checkpoint(model, pretrained)
         print("missing keys:")
         print(msg.missing_keys)
+    print("lora only")
+    lora.mark_only_lora_as_trainable(model)
     return model
 
 class BLIP_Retrieval(nn.Module):
@@ -372,7 +373,10 @@ class BLIP_Retrieval(nn.Module):
         
         ###============== Image-text Contrastive Learning ===================###
         idx = idx.view(-1,1)
-        idx_all = torch.cat([idx.t(), self.idx_queue.clone().detach()],dim=1)  
+        idx_all = torch.cat([idx.t(), self.idx_queue.clone().detach()],dim=1)
+        # print(idx)
+        # print(idx.shape)
+        # print(idx_all.shape)
         pos_idx = torch.eq(idx, idx_all).float()       
         sim_targets = pos_idx / pos_idx.sum(1,keepdim=True)   
         
@@ -388,8 +392,12 @@ class BLIP_Retrieval(nn.Module):
             text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:,0,:]),dim=-1) 
             text_feat_m_all = torch.cat([text_feat_m.t(),self.text_queue.clone().detach()],dim=1)
 
-            sim_i2t_m = image_feat_m @ text_feat_m_all / self.temp  
-            sim_t2i_m = text_feat_m @ image_feat_m_all / self.temp   
+            sim_i2t_m = image_feat_m @ text_feat_m_all / self.temp
+            sim_t2i_m = text_feat_m @ image_feat_m_all / self.temp
+            # print(sim_targets.shape)
+            # print(sim_t2i_m.shape)
+            # sim_targets = torch.zeros(sim_i2t_m.size()).to(image.device)
+            # sim_targets.fill_diagonal_(1)
 
             sim_i2t_targets = alpha * F.softmax(sim_i2t_m, dim=1) + (1 - alpha) * sim_targets
             sim_t2i_targets = alpha * F.softmax(sim_t2i_m, dim=1) + (1 - alpha) * sim_targets        

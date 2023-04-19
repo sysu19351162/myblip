@@ -15,6 +15,7 @@ import datetime
 import json
 from tqdm import tqdm
 from pathlib import Path
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
@@ -23,7 +24,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 
-from models.blip_retrieval import blip_retrieval_knowledge
+from models.blip_retrieval_lora import blip_retrieval_knowledge
 import utils
 from utils import cosine_lr_schedule
 from data import create_dataset, create_sampler, create_loader
@@ -41,15 +42,18 @@ def train(model, data_loader, optimizer, epoch, device, config):
     print_freq = 50
 
     for i, (image, caption, idx, knowledge_conceptnet, knowledge_vg) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        image = image.to(device,non_blocking=True)   
-        idx = idx.to(device,non_blocking=True)   
+
+        image = image.to(device,non_blocking=True)
+        idx = idx.to(device,non_blocking=True)
+        # print('idx')
+
        
         if epoch>0:
             alpha = config['alpha']
         else:
             alpha = config['alpha']*min(1,i/len(data_loader))
 
-        loss_ita, loss_itm = model(image, caption, alpha=alpha, idx=idx, knowledge_conceptnet=knowledge_conceptnet, knowledge_vg=knowledge_vg)
+        loss_ita, loss_itm = model(image, caption, alpha=alpha, idx=idx, kgs=knowledge_vg)
         loss = loss_ita + loss_itm
         
         optimizer.zero_grad()
@@ -82,19 +86,21 @@ def evaluation(model, data_loader, device, config):
 
     knowledge_outputs=[]
     num_text = len(texts)
-    text_bs = 256
+    # text_bs = 256
+    text_bs = 64
     text_ids = []
     text_embeds = []  
     text_atts = []
     # print(len(knowledge_cc))
     # print(num_text)
     print("evaluation_text_feature")
-    for i in range(0, num_text, text_bs):
+    for i in tqdm(range(0, num_text, text_bs)):
         # print(i)
         # print(min(num_text, i+text_bs))
 
         # knowledge_input = knowledge_cc[i: min(num_text, i+text_bs)]
         text = texts[i: min(num_text, i+text_bs)]
+        # print(text)
         # print(len(knowledge_input))
         # print(len(text))
         text_input = model.tokenizer(text, padding='max_length', truncation=True, max_length=35, return_tensors="pt").to(device) 
@@ -119,7 +125,7 @@ def evaluation(model, data_loader, device, config):
     image_feats = []
     image_embeds = []
     print("evaluation_image_feature")
-    for image, img_id, knowledge_conceptnet, knowledge_vg in data_loader:
+    for image, img_id in tqdm(data_loader):
     # for image, img_id,knowledge_conceptnet, knowledge_vg in data_loader:
         # knowledge_input = knowledge_conceptnet
         # knowledge = model.tokenizer(knowledge_input, padding='max_length', truncation=True,
@@ -128,32 +134,34 @@ def evaluation(model, data_loader, device, config):
         # knowledge_output = model.knowledge_encoder(knowledge.input_ids, attention_mask=knowledge.attention_mask,
         #                                            return_dict=True, mode='text')
         image = image.to(device)
+        # print(image)
+        # print(img_id)
         image_feat = model.visual_encoder(image)
-        knowledge = model.tokenizer(knowledge_conceptnet, padding='max_length', truncation=True,
-                                    max_length=model.knowledge_len,
-                                    return_tensors="pt").to(device)
-        knowledge_output = model.knowledge_encoder(knowledge.input_ids, attention_mask=knowledge.attention_mask,
-                                                return_dict=True, mode='text')
-        image_feat = model.ImageKnowledgeGating(image_feat, knowledge_output.last_hidden_state)
+
+
         image_embed = model.vision_proj(image_feat[:,0,:])
         image_embed = F.normalize(image_embed,dim=-1)
         
         image_feats.append(image_feat.cpu())
         image_embeds.append(image_embed)
-     
+    # print(111111)
     image_feats = torch.cat(image_feats,dim=0)
     image_embeds = torch.cat(image_embeds,dim=0)
     # print(image_embeds.shape)
     print("evaluation data prepared")
     sims_matrix = image_embeds @ text_embeds.t()
     score_matrix_i2t = torch.full((len(data_loader.dataset.image),len(texts)),-100.0).to(device)
-    print(sims_matrix.shape)
+    # print(sims_matrix.shape)
     num_tasks = utils.get_world_size()
     rank = utils.get_rank() 
     step = sims_matrix.size(0)//num_tasks + 1
     start = rank*step
     end = min(sims_matrix.size(0),start+step)
     print("evaluation_score")
+    # print(sims_matrix.shape)
+    # print(score_matrix_i2t.shape)
+    # print(start)
+    # print(end)
     for i,sims in enumerate(metric_logger.log_every(sims_matrix[start:end], 50, header)): 
         topk_sim, topk_idx = sims.topk(k=config['k_test'], dim=0)
 
@@ -166,6 +174,11 @@ def evaluation(model, data_loader, device, config):
                                     return_dict = True,
                                    )
         score = model.itm_head(output.last_hidden_state[:,0,:])[:,1]
+        # print(start+i)
+        # print(topk_idx.shape)
+        # print(score_matrix_i2t.shape)
+        # print(score.shape)
+        # print(topk_sim)
         score_matrix_i2t[start+i,topk_idx] = score + topk_sim
         
     sims_matrix = sims_matrix.t()
@@ -285,7 +298,7 @@ def main(args, config):
     
     train_loader, val_loader, test_loader = create_loader([train_dataset, val_dataset, test_dataset],samplers,
                                                           batch_size=[config['batch_size_train']]+[config['batch_size_test']]*2,
-                                                          num_workers=[4,4,4],
+                                                          num_workers=[4,0,0],
                                                           is_trains=[True, False, False], 
                                                           collate_fns=[None,None,None])   
    
@@ -306,17 +319,20 @@ def main(args, config):
     model_without_ddp = model
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module   
+        model_without_ddp = model.module
+    optimizer = torch.optim.AdamW(params=model.parameters(), lr=config['init_lr'], weight_decay=config['weight_decay'])
 
-    optimizer = torch.optim.AdamW(params=model.parameters(), lr=config['init_lr'], weight_decay=config['weight_decay']) 
-    
+    if config['start_epoch'] != 0:
+        path_checkpoint = config['pretrained']  # 断点路径
+        checkpoint = torch.load(path_checkpoint)
+        optimizer.load_state_dict(checkpoint['optimizer'])
     best = 0
     best_epoch = 0
 
     print("Start training")
     start_time = time.time()    
 
-    for epoch in range(0, config['max_epoch']):
+    for epoch in range(config['start_epoch'], config['max_epoch']):
         print("args.evaluate")
         print(args.evaluate)
         if not args.evaluate:        
@@ -325,17 +341,18 @@ def main(args, config):
                 
             cosine_lr_schedule(optimizer, epoch, config['max_epoch'], config['init_lr'], config['min_lr'])
             
-            train_stats = train(model, train_loader, optimizer, epoch, device, config)  
+            train_stats = train(model, train_loader, optimizer, epoch, device, config)
         print("val evaluation")
         score_val_i2t, score_val_t2i, = evaluation(model_without_ddp, val_loader, device, config)
         print("test evaluation")
         score_test_i2t, score_test_t2i = evaluation(model_without_ddp, test_loader, device, config)
-    
+
         if utils.is_main_process():
             print("val eval")
-            val_result = itm_eval(score_val_i2t, score_val_t2i, val_loader.dataset.txt2img, val_loader.dataset.img2txt)  
+            val_result = itm_eval(score_val_i2t, score_val_t2i, val_loader.dataset.txt2img, val_loader.dataset.img2txt)
             print(val_result)
-                                
+
+
             if val_result['r_mean']>best:
                 save_obj = {
                     'model': model_without_ddp.state_dict(),
@@ -343,28 +360,28 @@ def main(args, config):
                     'config': config,
                     'epoch': epoch,
                 }
-                torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_best.pth'))  
-                best = val_result['r_mean']        
+                torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_best_epoch'+str(epoch)+'.pth'))
+                best = val_result['r_mean']
                 best_epoch = epoch
                 print("test eval")
-                test_result = itm_eval(score_test_i2t, score_test_t2i, test_loader.dataset.txt2img, test_loader.dataset.img2txt) 
+                test_result = itm_eval(score_test_i2t, score_test_t2i, test_loader.dataset.txt2img, test_loader.dataset.img2txt)
                 print(test_result)
-            
-            if args.evaluate:                
+
+            if args.evaluate:
                 log_stats = {**{f'val_{k}': v for k, v in val_result.items()},
-                             **{f'test_{k}': v for k, v in test_result.items()},                  
+                             **{f'test_{k}': v for k, v in test_result.items()},
                             }
                 with open(os.path.join(args.output_dir, "evaluate.txt"),"a") as f:
-                    f.write(json.dumps(log_stats) + "\n")     
+                    f.write(json.dumps(log_stats) + "\n")
             else:
                 log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                              **{f'val_{k}': v for k, v in val_result.items()},
-                             **{f'test_{k}': v for k, v in test_result.items()},  
+                             **{f'test_{k}': v for k, v in test_result.items()},
                              'epoch': epoch,
                              'best_epoch': best_epoch,
                             }
                 with open(os.path.join(args.output_dir, "log.txt"),"a") as f:
-                    f.write(json.dumps(log_stats) + "\n")   
+                    f.write(json.dumps(log_stats) + "\n")
 
         if args.evaluate: 
             break
@@ -380,7 +397,7 @@ def main(args, config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = '4,5'
+    # os.environ["CUDA_VISIBLE_DEVICES"] = '4,5'
     print(os.environ["CUDA_VISIBLE_DEVICES"])
     parser.add_argument('--config', default='./configs/retrieval_flickr_knowledge.yaml')
     parser.add_argument('--output_dir', default='output/Retrieval_flickr_knowledge')

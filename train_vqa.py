@@ -180,7 +180,7 @@ def main(args, config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    os.environ["CUDA_VISIBLE_DEVICES"] = '6'
+    # os.environ["CUDA_VISIBLE_DEVICES"] = '6'
     parser.add_argument('--config', default='./configs/vqa.yaml') 
     parser.add_argument('--output_dir', default='output/VQA')
     parser.add_argument('--evaluate', action='store_true')      

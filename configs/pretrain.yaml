@@ -4,7 +4,8 @@ train_file: ['/mnt/data/yangzhenbang/BLIP/annotation/coco_karpathy_train_pretrai
 #train_file: [
 #             '/mnt/data/yangzhenbang/BLIP/annotation/vg_caption.json',
 #             ]
-laion_path: ''   
+laion_path: ''
+cc3m_path: '/data1/yangzhenbang_new/datasets/coco'
 
 # size of vit model; base or large
 vit: 'base'
@@ -13,7 +14,7 @@ vit_ckpt_layer: 0
 
 image_size: 224
 #batch_size: 75
-batch_size: 32
+batch_size: 24
 queue_size: 57600
 alpha: 0.4
 
